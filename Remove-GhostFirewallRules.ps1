@@ -7,48 +7,46 @@ function safecount($theobj)
     ($null -eq $theobj) ? 0 : @($theobj).Count
 }
 
-$activity = "Getting firewall rules"
-Write-Progress -Activity $activity
-$rules = Get-NetFirewallRule | ForEach-Object {
-    [PSCustomObject]@{
-        Rule = $_
-        AppFilter = $null
-    }
-}
-Write-Progress -Activity $activity -Completed
+Write-Host "Locating ghost application firewall rules..."
 
-$activity = "Locating apps associated with firewall rules"
-Write-Progress -Activity $activity
-$progress=0
-$rules | ForEach-Object {
-    Write-Progress -Activity $activity -Status $_.Rule.DisplayName -PercentComplete (100 * $progress / $rules.Count)
-    $_.AppFilter = ($_.Rule | Get-NetFirewallApplicationFilter) 
-    $progress++
-}
-Write-Progress -Activity $activity -Completed
-
-# ghost rules are the rules where the app no longer exists:
-$ghostrules = $rules | Where-Object { 
-    $_.AppFilter.Program -ne $null -and 
-    $_.AppFilter.Program -ne 'Any' -and 
-    $_.AppFilter.Program -ne 'System' -and 
-    !(Test-Path -PathType Leaf -Path ([environment]::ExpandEnvironmentVariables($_.AppFilter.Program)))  
+$ghostrules = Get-NetFirewallApplicationFilter | Where-Object { 
+    $_.Program -ne $null -and
+    $_.Program -ne 'Any' -and
+    $_.Program -ne 'System' -and
+    !(Test-Path -PathType Leaf -Path ([environment]::ExpandEnvironmentVariables($_.Program)))
 }
 
-$selectedRules = $ghostrules | ForEach-Object { 
-    [PSCustomObject]@{
-        Name = $_.Rule.DisplayName
-        Direction = $_.Rule.Direction
-        Action = $_.Rule.Action
-        Program = $_.AppFilter.Program
-        Rule = $_.Rule
-    }
-} | Out-GridView -Title "Found $(safecount $ghostrules) ghost program firewall rules, please select which rules to remove" -OutputMode Multiple | ForEach-Object { $_.Rule }
-
-if((safecount $selectedRules) -gt 0)
+if((safecount $ghostrules) -gt 0)
 {
-    if((Read-Host -Prompt "Do you really want to delete these $(safecount $selectedRules) rules, type yes to confirm") -eq 'yes')
+    Write-Host "Found $(safecount $ghostrules) ghost program firewall rules..."
+
+    $rules = Get-NetFirewallRule
+
+    $selectedRules = $ghostrules | Foreach-Object { 
+        # find the full firewall rule that matches this firewall application filter
+        $matchingRule =  ($rules | Where-Object InstanceID -ieq $_.InstanceID | Select-Object -First 1)
+        if($null -ne $matchingRule){
+            [PSCustomObject]@{
+                Name = $matchingRule.DisplayName
+                Direction = $matchingRule.Direction
+                Action = $matchingRule.Action
+                Program= $_.Program
+                Rule = $matchingRule
+            }
+        }   
+    } | Out-GridView -Title "Found $(safecount $ghostrules) ghost program firewall rules, please select which rules to remove" -OutputMode Multiple | ForEach-Object { $_.Rule }
+
+    if((safecount $selectedRules) -gt 0)
     {
-        $selectedRules | Remove-NetFirewallRule
+        if((Read-Host -Prompt "Do you really want to delete these $(safecount $selectedRules) rules, type yes to confirm") -eq 'yes')
+        {
+            $selectedRules | Remove-NetFirewallRule
+        }
     }
 }
+else 
+{
+    Write-Host "no ghost firewall rules located."
+}
+
+Write-Host "Ready."
