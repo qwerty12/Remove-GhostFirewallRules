@@ -1,10 +1,13 @@
-#requires -Version 7.4
+#requires -RunAsAdministrator
 Set-StrictMode -Version 3
 
 function safecount($theobj)
 {
     # it shouldn't be this difficult to count an object in strict mode :(
-    ($null -eq $theobj) ? 0 : @($theobj).Count
+    if ($null -eq $theobj) {
+        return 0
+    }
+    return @($theobj).Count
 }
 
 Write-Host "Locating ghost application firewall rules..."
@@ -16,37 +19,46 @@ $ghostrules = Get-NetFirewallApplicationFilter | Where-Object {
     !(Test-Path -PathType Leaf -Path ([environment]::ExpandEnvironmentVariables($_.Program)))
 }
 
-if((safecount $ghostrules) -gt 0)
+$count = safecount $ghostrules
+if($count -gt 0)
 {
-    Write-Host "Found $(safecount $ghostrules) ghost program firewall rules..."
-
     $rules = Get-NetFirewallRule
+    $selectedRules = [PSCustomObject[]]::new($count)
 
-    $selectedRules = $ghostrules | Foreach-Object { 
+    $index = 0
+    foreach ($ghost in $ghostrules) {
         # find the full firewall rule that matches this firewall application filter
-        $matchingRule =  ($rules | Where-Object InstanceID -ieq $_.InstanceID | Select-Object -First 1)
+        $matchingRule = $rules | Where-Object InstanceID -ieq $ghost.InstanceID | Select-Object -First 1
         if($null -ne $matchingRule){
-            [PSCustomObject]@{
-                Name = $matchingRule.DisplayName
-                Direction = $matchingRule.Direction
-                Action = $matchingRule.Action
-                Program= $_.Program
-                Rule = $matchingRule
+            if ($null -ne $matchingRule.Group -and $matchingRule.Group.StartsWith("@FirewallAPI.dll,")) {
+                continue
             }
-        }   
-    } | Out-GridView -Title "Found $(safecount $ghostrules) ghost program firewall rules, please select which rules to remove" -OutputMode Multiple | ForEach-Object { $_.Rule }
 
-    if((safecount $selectedRules) -gt 0)
-    {
-        if((Read-Host -Prompt "Do you really want to delete these $(safecount $selectedRules) rules, type yes to confirm") -eq 'yes')
-        {
-            $selectedRules | Remove-NetFirewallRule
+            $selectedRules[$index++] = [PSCustomObject]@{
+                Name      = $matchingRule.DisplayName
+                Direction = $matchingRule.Direction
+                Action    = $matchingRule.Action
+                Program   = $ghost.Program
+                Rule      = $matchingRule
+            }
         }
     }
-}
-else 
-{
-    Write-Host "no ghost firewall rules located."
+
+    if($index -gt 0)
+    {
+        $msg = "Found $index ghost program firewall rules"
+        Write-Host "$msg for possible removal"
+        $selectedRules = $selectedRules | Out-GridView -Title "$msg, please select which to remove" -OutputMode Multiple | ForEach-Object { $_.Rule }
+
+        if((safecount $selectedRules) -gt 0)
+        {
+            $selectedRules | ForEach-Object {
+                Write-Host "Removing firewall rule: $($_.DisplayName)"
+                $_ | Remove-NetFirewallRule
+            }
+        }
+        return
+    }
 }
 
-Write-Host "Ready."
+Write-Host "no ghost firewall rules located."
